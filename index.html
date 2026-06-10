@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI-AVL-1: Rotating Shaft Analyzer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow: hidden; height: 100vh; display: flex; color: #333;}
+        #threejs-container { flex: 1; position: relative; background-color: #eee; }
+        #controls-panel { width: 320px; background: #fff; padding: 20px; box-shadow: -2px 0 10px rgba(0,0,0,0.1); overflow-y: auto; display: flex; flex-direction: column; transition: transform 0.3s ease; transform: translateX(0); z-index: 10; }
+        #controls-panel.collapsed { transform: translateX(100%); }
+        #toggle-controls { position: absolute; top: 20px; right: 340px; background: #fff; border: 1px solid #ccc; padding: 10px; cursor: pointer; border-radius: 5px; z-index: 11; transition: right 0.3s ease;}
+        #controls-panel.collapsed + #toggle-controls { right: 20px; }
+
+        h1 { font-size: 1.2rem; margin-top: 0; color: #004080; }
+        h2 { font-size: 1rem; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #eee; padding-bottom: 3px;}
+        .control-group { margin-bottom: 12px; }
+        label { display: block; font-size: 0.85rem; font-weight: bold; margin-bottom: 3px; color: #555;}
+        input[type="range"] { width: 100%; margin: 0; }
+        .value-display { font-size: 0.8rem; color: #777; float: right; }
+        
+        #results-area { margin-top: 20px; background: #f9f9f9; padding: 15px; border-radius: 5px; border: 1px solid #eee; font-size: 0.9rem;}
+        .result-item { margin-bottom: 5px; display: flex; justify-content: space-between;}
+        .result-label { font-weight: bold; color: #444; }
+        
+        /* 2D Graph Area */
+        #graphs-container { position: absolute; bottom: 20px; left: 20px; width: calc(100% - 380px); height: 250px; background: rgba(255,255,255,0.9); border-radius: 8px; padding: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); display: flex; gap: 10px; z-index: 5; transition: width 0.3s ease;}
+        #controls-panel.collapsed ~ #graphs-container { width: calc(100% - 40px); }
+        .graph-box { flex: 1; height: 100%; position: relative; }
+        canvas { width: 100% !important; height: 100% !important; }
+        
+    </style>
+</head>
+<body>
+
+    <div id="threejs-container">
+        <button id="toggle-controls">☰ Controls</button>
+        
+        <div id="graphs-container">
+            <div class="graph-box"><canvas id="sfdChart"></canvas></div>
+            <div class="graph-box"><canvas id="bmdChart"></canvas></div>
+            <div class="graph-box"><canvas id="torsionChart"></canvas></div>
+        </div>
+    </div>
+
+    <div id="controls-panel">
+        <h1>Shaft Design (AI-AVL-1)</h1>
+        
+        <h2>Global Parameters</h2>
+        <div class="control-group">
+            <label>Shaft Length (L) <span class="value-display" id="val-L">5000 mm</span></label>
+            <input type="range" id="input-L" min="1000" max="10000" value="5000" step="100">
+        </div>
+        <div class="control-group">
+            <label>Shaft Diameter (d) <span class="value-display" id="val-d">50 mm</span></label>
+            <input type="range" id="input-d" min="10" max="200" value="50" step="1">
+        </div>
+
+        <h2>Loading</h2>
+        <div class="control-group">
+            <label>Point Load (P) <span class="value-display" id="val-P">1000 N</span></label>
+            <input type="range" id="input-P" min="100" max="10000" value="1000" step="100">
+        </div>
+        <div class="control-group">
+            <label>Load Position (a) <span class="value-display" id="val-a">2500 mm</span></label>
+            <input type="range" id="input-a" min="0" max="5000" value="2500" step="10">
+        </div>
+        <div class="control-group">
+            <label>Torque (T) <span class="value-display" id="val-T">500 N·m</span></label>
+            <input type="range" id="input-T" min="10" max="5000" value="500" step="10">
+        </div>
+
+        <div id="results-area">
+            <h2>Static Results</h2>
+            <div class="result-item"><span class="result-label">R<sub>A</sub> (Left):</span> <span id="res-RA">500 N</span></div>
+            <div class="result-item"><span class="result-label">R<sub>B</sub> (Right):</span> <span id="res-RB">500 N</span></div>
+            <div class="result-item"><span class="result-label">Max Moment (M<sub>max</sub>):</span> <span id="res-Mmax">1250 N·m</span></div>
+            <div class="result-item"><span class="result-label">Max Tor. Stress (τ<sub>max</sub>):</span> <span id="res-Taumax">20.4 MPa</span></div>
+        </div>
+    </div>
+
+    <script>
+        // --- UI & Interaction ---
+        const controlsPanel = document.getElementById('controls-panel');
+        const toggleBtn = document.getElementById('toggle-controls');
+        
+        toggleBtn.addEventListener('click', () => {
+            controlsPanel.classList.toggle('collapsed');
+        });
+
+        // Setup Input Listeners
+        const inputs = ['L', 'd', 'P', 'a', 'T'];
+        inputs.forEach(id => {
+            const inputEl = document.getElementById(`input-${id}`);
+            inputEl.addEventListener('input', () => {
+                // Special case: Load position (a) cannot exceed Length (L)
+                if (id === 'L') {
+                    const aInput = document.getElementById('input-a');
+                    aInput.max = inputEl.value;
+                    if (parseInt(aInput.value) > parseInt(inputEl.value)) {
+                        aInput.value = inputEl.value;
+                    }
+                }
+                update();
+            });
+        });
+
+        // --- Core Engineering Calculations ---
+        function calculate() {
+            const L = parseFloat(document.getElementById('input-L').value); // mm
+            const d = parseFloat(document.getElementById('input-d').value); // mm
+            const P = parseFloat(document.getElementById('input-P').value); // N
+            const a = parseFloat(document.getElementById('input-a').value); // mm
+            const T_Nm = parseFloat(document.getElementById('input-T').value); // N*m
+            
+            const T = T_Nm * 1000; // Convert Torque to N*mm for consistency
+
+            // 1. Reactions (Static Equilibrium)
+            // R_A = P*(L-a)/L, R_B = P*a/L
+            const RA = P * (L - a) / L;
+            const RB = P * a / L;
+
+            // 2. Max Bending Moment (occurs at x=a for point load)
+            const Mmax = RA * a; // N*mm
+
+            // 3. Torsional Stress
+            // J = pi * d^4 / 32 (Solid shaft)
+            const J = Math.PI * Math.pow(d, 4) / 32;
+            // Tau_max = T * c / J, where c = r_max = d/2
+            const Taumax = (T * (d/2)) / J; // N/mm^2 = MPa
+
+            return { L, d, P, a, T: T_Nm, RA, RB, Mmax, Taumax, J };
+        }
+
+        // --- 2D Graphing (Chart.js) ---
+        let sfdChart, bmdChart, torsionChart;
+
+        function initCharts() {
+            const commonOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: { type: 'linear', position: 'bottom', title: { display: true, text: 'Position x (mm)' }},
+                    y: { title: { display: true }}
+                },
+                plugins: { legend: { display: false }, title: { display: true, font: { size: 14 }}}
+            };
+
+            // SFD
+            sfdChart = new Chart(document.getElementById('sfdChart'), {
+                type: 'line',
+                data: { datasets: [{ label: 'SFD', borderColor: '#007bff', backgroundColor: 'rgba(0,123,255,0.1)', data: [], fill: true, stepped: true, pointRadius: 0 }] },
+                options: { ...commonOptions, plugins: { ...commonOptions.plugins, title: { ...commonOptions.plugins.title, text: 'Shear Force (N)' }}}
+            });
+
+            // BMD
+            bmdChart = new Chart(document.getElementById('bmdChart'), {
+                type: 'line',
+                data: { datasets: [{ label: 'BMD', borderColor: '#28a745', backgroundColor: 'rgba(40,167,69,0.1)', data: [], fill: true, pointRadius: 0 }] },
+                options: { ...commonOptions, plugins: { ...commonOptions.plugins, title: { ...commonOptions.plugins.title, text: 'Bending Moment (N·m)' }}}
+            });
+
+            // Torsional Stress (Stress vs Radius, not position x)
+            torsionChart = new Chart(document.getElementById('torsionChart'), {
+                type: 'line',
+                data: { datasets: [{ label: 'Torsional Stress', borderColor: '#dc3545', data: [], pointRadius: 0 }] },
+                options: { 
+                    ...commonOptions, 
+                    scales: { 
+                        x: { type: 'linear', position: 'bottom', title: { display: true, text: 'Radius r (mm)' }},
+                        y: { title: { display: true, text: 'Stress (MPa)' }}
+                    },
+                    plugins: { ...commonOptions.plugins, title: { ...commonOptions.plugins.title, text: 'Torsional Stress \u03c4(r)' }}
+                }
+            });
+        }
+
+        function updateCharts(data) {
+            const { L, a, RA, RB, Mmax, Taumax, d } = data;
+            
+            // Define points along the shaft (x-axis)
+            const sfdPoints = [
+                { x: 0, y: RA },
+                { x: a, y: RA },
+                { x: a, y: RA - data.P },
+                { x: L, y: RA - data.P },
+                { x: L, y: 0 }
+            ];
+            sfdChart.data.datasets[0].data = sfdPoints;
+            sfdChart.update('none');
+
+            const bmdPoints = [
+                { x: 0, y: 0 },
+                { x: a, y: Mmax / 1000 }, // Convert N*mm to N*m
+                { x: L, y: 0 }
+            ];
+            bmdChart.data.datasets[0].data = bmdPoints;
+            bmdChart.update('none');
+
+            // Torsional Stress vs Radius (r)
+            const rMax = d / 2;
+            const torsionPoints = [
+                { x: 0, y: 0 },
+                { x: rMax, y: Taumax }
+            ];
+            torsionChart.data.datasets[0].data = torsionPoints;
+            torsionChart.scales.x.max = rMax * 1.1; // Add padding to radius scale
+            torsionChart.update('none');
+        }
+
+        // --- 3D Scene (Three.js) ---
+        let scene, camera, renderer, shaft, loadArrow, supportA, supportB;
+
+        function init3D() {
+            const container = document.getElementById('threejs-container');
+            
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xeeeeee);
+            
+            camera = new THREE.PerspectiveCamera(75, container.offsetWidth / container.offsetHeight, 1, 50000);
+            camera.position.set(2500, 1500, 6000); // Look at the middle
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.offsetWidth, container.offsetHeight);
+            container.appendChild(renderer.domElement);
+
+            const controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.target.set(2500, 0, 0);
+            controls.update();
+
+            // Lighting
+            scene.add(new THREE.AmbientLight(0x404040));
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(1, 1, 1).normalize();
+            scene.add(directionalLight);
+
+            // Ground Plane Grid
+            const gridHelper = new THREE.GridHelper(20000, 20, 0x888888, 0xcccccc);
+            gridHelper.position.y = -500;
+            scene.add(gridHelper);
+
+            // Axes Helper
+            scene.add(new THREE.AxesHelper(1000));
+
+            // Shaft Geometry (placeholder, will be updated)
+            const shaftMat = new THREE.MeshPhongMaterial({ color: 0x999999, specular: 0x111111, shininess: 30 });
+            shaft = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 32), shaftMat);
+            shaft.rotation.z = Math.PI / 2; // Lie along X axis
+            scene.add(shaft);
+
+            // Supports (Placeholders)
+            const supportMat = new THREE.MeshLambertMaterial({ color: 0x444444 });
+            supportA = new THREE.Mesh(new THREE.BoxGeometry(200, 400, 200), supportMat);
+            supportB = new THREE.Mesh(new THREE.BoxGeometry(200, 400, 200), supportMat);
+            scene.add(supportA);
+            scene.add(supportB);
+
+            // Load Arrow (Placeholder)
+            const arrowDir = new THREE.Vector3(0, -1, 0);
+            const arrowOrigin = new THREE.Vector3(0, 0, 0);
+            loadArrow = new THREE.ArrowHelper(arrowDir, arrowOrigin, 1000, 0xff0000, 200, 100);
+            scene.add(loadArrow);
+
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function onWindowResize() {
+            const container = document.getElementById('threejs-container');
+            camera.aspect = container.offsetWidth / container.offsetHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.offsetWidth, container.offsetHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+
+        function update3D(data) {
+            const { L, d, a } = data;
+
+            // Update Shaft Length and Diameter
+            shaft.geometry.dispose();
+            shaft.geometry = new THREE.CylinderGeometry(d/2, d/2, L, 32);
+            shaft.position.x = L / 2; // Center the cylinder
+            shaft.position.y = 0;
+
+            // Update Supports
+            supportA.position.set(0, -d/2 - 200, 0); // At x=0, under shaft
+            supportB.position.set(L, -d/2 - 200, 0); // At x=L, under shaft
+
+            // Update Load Arrow Position
+            loadArrow.position.set(a, d/2 + 50, 0); // At x=a, above shaft
+            // Scale arrow length based on load P (visual representation)
+            const scaleFactor = Math.max(500, data.P / 5);
+            loadArrow.setLength(scaleFactor, 200, 100);
+        }
+
+        // --- Main Update Loop ---
+        function update() {
+            const data = calculate();
+            
+            // Update UI Displays
+            document.getElementById('val-L').innerText = `${data.L} mm`;
+            document.getElementById('val-d').innerText = `${data.d} mm`;
+            document.getElementById('val-P').innerText = `${data.P} N`;
+            document.getElementById('val-a').innerText = `${data.a} mm`;
+            document.getElementById('val-T').innerText = `${data.T} N·m`;
+
+            document.getElementById('res-RA').innerText = `${data.RA.toFixed(1)} N`;
+            document.getElementById('res-RB').innerText = `${data.RB.toFixed(1)} N`;
+            document.getElementById('res-Mmax').innerText = `${(data.Mmax/1000).toFixed(1)} N·m`;
+            document.getElementById('res-Taumax').innerText = `${data.Taumax.toFixed(1)} MPa`;
+
+            // Update Visuals
+            update3D(data);
+            updateCharts(data);
+        }
+
+        // --- Initialization ---
+        init3D();
+        initCharts();
+        animate(); // Start 3D rendering loop
+        update(); // Initial engineering calculation and visual update
+
+    </script>
+</body>
+</html>
